@@ -125,6 +125,19 @@ export const messagesAPI = {
     })
     return data
   },
+  list: async () => {
+    const { data } = await api.get<
+      Array<{
+        id: string
+        recipient: string
+        emotion: string
+        risk: string
+        encryption: string
+        timestamp: string
+      }>
+    >("/messages")
+    return data
+  },
 }
 
 // Gmail API

@@ -10,7 +10,7 @@ from typing import Literal, Tuple
 from Crypto.Cipher import AES as AES_cipher
 from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
-from cryptography.hazmat.primitives.hkdf import HKDF
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 
 # Master secret — override via env in production.

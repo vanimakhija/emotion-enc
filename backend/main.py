@@ -330,6 +330,7 @@ def get_inbox(
             recipient_id=msg.recipient_id,
             sender_email=sender.email if sender else "Unknown",
             recipient_email=current_user.email,
+            recipient=current_user.email,
             emotion=msg.emotion,
             risk=msg.risk,
             encryption=msg.encryption,
@@ -367,6 +368,41 @@ def get_sent(
             recipient_id=msg.recipient_id,
             sender_email=current_user.email,
             recipient_email=recipient.email if recipient else "Unknown",
+            recipient=recipient.email if recipient else "Unknown",
+            emotion=msg.emotion,
+            risk=msg.risk,
+            encryption=msg.encryption,
+            timestamp=msg.timestamp,
+            is_read=msg.is_read,
+            created_at=msg.created_at,
+        ))
+    return result
+
+
+# ─── Get All Messages ─────────────────────────────────────────────────────────
+
+@app.get("/messages", response_model=list[MessageMeta])
+def get_messages(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    messages = (
+        db.query(Message)
+        .filter((Message.sender_id == current_user.id) | (Message.recipient_id == current_user.id))
+        .order_by(Message.created_at.desc())
+        .all()
+    )
+    result = []
+    for msg in messages:
+        sender = db.query(User).filter(User.id == msg.sender_id).first()
+        recipient = db.query(User).filter(User.id == msg.recipient_id).first()
+        result.append(MessageMeta(
+            id=msg.id,
+            sender_id=msg.sender_id,
+            recipient_id=msg.recipient_id,
+            sender_email=sender.email if sender else "Unknown",
+            recipient_email=recipient.email if recipient else "Unknown",
+            recipient=recipient.email if recipient else "Unknown",
             emotion=msg.emotion,
             risk=msg.risk,
             encryption=msg.encryption,

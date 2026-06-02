@@ -10,21 +10,8 @@ from pydantic import BaseModel, EmailStr, Field, constr, field_validator, Config
 
 class UserCreate(BaseModel):
     email: EmailStr
-    # bcrypt hard-truncates at 72 bytes — enforce the ceiling here.
-    password: constr(min_length=8, max_length=72)
+    password: constr(min_length=6, max_length=72)
 
-    @field_validator("password")
-    @classmethod
-    def validate_password_strength(cls, value: str) -> str:
-        has_lower = any(c.islower() for c in value)
-        has_upper = any(c.isupper() for c in value)
-        has_digit = any(c.isdigit() for c in value)
-        if not (has_lower and has_upper and has_digit):
-            raise ValueError(
-                "Password must contain at least one uppercase letter, "
-                "one lowercase letter, and one digit"
-            )
-        return value
 
 
 class UserLogin(BaseModel):
@@ -72,6 +59,7 @@ class MessageMeta(BaseModel):
     recipient_id:     int
     sender_email:     Optional[str] = None
     recipient_email:  Optional[str] = None
+    recipient:        Optional[str] = None
     emotion:          str
     risk:             str
     encryption:       str
