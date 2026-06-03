@@ -152,28 +152,27 @@ def read_me(current_user: User = Depends(get_current_user)):
 
 # ─── Send Message ─────────────────────────────────────────────────────────────
 
-@app.post("/send", response_model=SendResponse)
-def send(
-    req: SendRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    # Ensure recipient placeholder exists for FK integrity
-    recipient_user = db.query(User).filter(User.email == req.recipient).first()
+def _process_and_dispatch_message(
+    message_text: str,
+    recipient_email: str,
+    db: Session,
+    current_user: User,
+) -> tuple[str, str, str, str, str]:
+    recipient_user = db.query(User).filter(User.email == recipient_email).first()
     if not recipient_user:
-        recipient_user = User(email=req.recipient, hashed_password=None)
+        recipient_user = User(email=recipient_email, hashed_password=None)
         db.add(recipient_user)
         db.commit()
         db.refresh(recipient_user)
 
-    sentiment = analyze_sentiment(req.message)
+    sentiment = analyze_sentiment(message_text)
     risk = get_risk(sentiment.emotion)
     encryption_label, key_length = get_encryption_policy(risk)
 
     message_id = str(uuid.uuid4())
     timestamp = _ts()
 
-    ciphertext_b64, iv_b64, salt_b64 = encrypt_plaintext(req.message, key_length)
+    ciphertext_b64, iv_b64, salt_b64 = encrypt_plaintext(message_text, key_length)
 
     logger.info(
         "Message encrypted",
@@ -197,32 +196,58 @@ def send(
         salt=salt_b64,
     )
     db.add(msg)
+    db.flush()
+
+    return message_id, sentiment.emotion, risk, encryption_label, ciphertext_b64
+
+def _notify_recipient_via_gmail(
+    current_user: User,
+    recipient_email: str,
+    encryption_label: str,
+    emotion: str,
+    message_id: str,
+    ciphertext_b64: str,
+    db: Session,
+):
+    if not current_user.google_access_token:
+        return
+        
+    gmail_body = (
+        f"You have a new encrypted message.\n\n"
+        f"Encryption: {encryption_label}  |  Emotion: {emotion}\n\n"
+        f"Open the app to read it: {os.getenv('FRONTEND_URL', 'http://localhost:3000')}/message/{message_id}\n\n"
+        f"--- Ciphertext (for reference) ---\n{ciphertext_b64}"
+    )
+    try:
+        send_email(current_user.google_access_token, recipient_email, "New Encrypted Message", gmail_body)
+    except GmailException:
+        if current_user.google_refresh_token:
+            try:
+                new_token = refresh_access_token(current_user, db)
+                if new_token:
+                    send_email(new_token, recipient_email, "New Encrypted Message", gmail_body)
+            except Exception:
+                pass
+
+
+@app.post("/send", response_model=SendResponse)
+def send(
+    req: SendRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    message_id, emotion, risk, encryption_label, ciphertext_b64 = _process_and_dispatch_message(
+        req.message, req.recipient, db, current_user
+    )
     db.commit()
 
-    # Send via Gmail if OAuth is connected.
-    # We send the ciphertext — NOT the plaintext — so the message remains
-    # encrypted in transit and in the recipient's Gmail inbox.
-    if current_user.google_access_token:
-        gmail_body = (
-            f"You have a new encrypted message.\n\n"
-            f"Encryption: {encryption_label}  |  Emotion: {sentiment.emotion}\n\n"
-            f"Open the app to read it: {os.getenv('FRONTEND_URL', '')}/message/{message_id}\n\n"
-            f"--- Ciphertext (for reference) ---\n{ciphertext_b64}"
-        )
-        try:
-            send_email(current_user.google_access_token, req.recipient, "New Encrypted Message", gmail_body)
-        except GmailException:
-            if current_user.google_refresh_token:
-                try:
-                    new_token = refresh_access_token(current_user, db)
-                    if new_token:
-                        send_email(new_token, req.recipient, "New Encrypted Message", gmail_body)
-                except Exception:
-                    pass  # Gmail delivery is best-effort; message is already in DB
+    _notify_recipient_via_gmail(
+        current_user, req.recipient, encryption_label, emotion, message_id, ciphertext_b64, db
+    )
 
     return SendResponse(
         message_id=message_id,
-        emotion=sentiment.emotion,
+        emotion=emotion,
         risk=risk,
         encryption=encryption_label,
     )
@@ -239,44 +264,16 @@ async def send_with_attachments(
     current_user: User = Depends(get_current_user),
 ):
     """Multipart endpoint supporting file attachments."""
-    # Reuse the JSON send logic by constructing a SendRequest-like object
-    from schemas import SendRequest as SR
-    req = SR(message=message, recipient=recipient)
-
-    # Delegate to the core send function (re-use the same send() logic inline)
-    recipient_user = db.query(User).filter(User.email == req.recipient).first()
-    if not recipient_user:
-        recipient_user = User(email=req.recipient, hashed_password=None)
-        db.add(recipient_user)
-        db.commit()
-        db.refresh(recipient_user)
-
-    sentiment = analyze_sentiment(req.message)
-    risk = get_risk(sentiment.emotion)
-    encryption_label, key_length = get_encryption_policy(risk)
-    message_id = str(uuid.uuid4())
-    timestamp = _ts()
-
-    ciphertext_b64, iv_b64, salt_b64 = encrypt_plaintext(req.message, key_length)
-
-    msg = Message(
-        id=message_id,
-        sender_id=current_user.id,
-        recipient_id=recipient_user.id,
-        emotion=sentiment.emotion,
-        risk=risk,
-        encryption=encryption_label,
-        timestamp=timestamp,
-        ciphertext=ciphertext_b64,
-        iv=iv_b64,
-        salt=salt_b64,
+    message_id, emotion, risk, encryption_label, ciphertext_b64 = _process_and_dispatch_message(
+        message, recipient, db, current_user
     )
-    db.add(msg)
-    db.flush()  # get message_id before saving attachments
 
     for upload in files:
+        if not upload.filename:
+            continue
         content = await upload.read()
         if len(content) > 10 * 1024 * 1024:  # 10 MB limit per file
+            db.rollback()
             raise HTTPException(413, f"File {upload.filename} exceeds 10 MB limit")
 
         safe_name = f"{uuid.uuid4()}_{upload.filename}"
@@ -295,9 +292,13 @@ async def send_with_attachments(
     db.commit()
     logger.info("Message with %d attachment(s) saved", len(files), extra={"message_id": message_id})
 
+    _notify_recipient_via_gmail(
+        current_user, recipient, encryption_label, emotion, message_id, ciphertext_b64, db
+    )
+
     return SendResponse(
         message_id=message_id,
-        emotion=sentiment.emotion,
+        emotion=emotion,
         risk=risk,
         encryption=encryption_label,
     )
@@ -383,13 +384,18 @@ def get_sent(
 
 @app.get("/messages", response_model=list[MessageMeta])
 def get_messages(
+    page: int = 1,
+    limit: int = 20,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    offset = (page - 1) * limit
     messages = (
         db.query(Message)
         .filter((Message.sender_id == current_user.id) | (Message.recipient_id == current_user.id))
         .order_by(Message.created_at.desc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
     result = []

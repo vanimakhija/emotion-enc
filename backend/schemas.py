@@ -10,7 +10,18 @@ from pydantic import BaseModel, EmailStr, Field, constr, field_validator, Config
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: constr(min_length=6, max_length=72)
+    password: str = Field(min_length=8, max_length=72)
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        if not any(char.isupper() for char in v):
+            raise ValueError('Password must contain at least one uppercase letter')
+        if not any(char.islower() for char in v):
+            raise ValueError('Password must contain at least one lowercase letter')
+        if not any(char.isdigit() for char in v):
+            raise ValueError('Password must contain at least one digit')
+        return v
 
 
 
