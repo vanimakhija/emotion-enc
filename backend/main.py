@@ -14,7 +14,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 from starlette.middleware.sessions import SessionMiddleware
-
+from sentiment_ml import analyze_sentiment_ml
 load_dotenv()
 
 from database import get_db, init_db
