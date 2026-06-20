@@ -2,30 +2,17 @@
 
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
-import { messagesAPI } from "@/lib/api"
+import { messagesAPI, MessageMeta } from "@/lib/api"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  ArrowLeft,
-  ShieldCheck,
-  Lock,
-  Unlock,
-  FileText,
-  Clock,
-  User,
-  Smile,
-  Frown,
-  Meh,
-} from "lucide-react"
+import { ArrowLeft, ShieldCheck, Lock, Unlock, FileText, Clock, User, Smile, Frown, Meh } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { formatDistanceToNow } from "date-fns"
 import { toast } from "sonner"
 
 const emotionIcons: Record<string, React.ElementType> = {
-  Positive: Smile,
-  Negative: Frown,
-  Neutral: Meh,
+  Positive: Smile, Negative: Frown, Neutral: Meh,
 }
 
 const riskColors: Record<string, string> = {
@@ -34,41 +21,29 @@ const riskColors: Record<string, string> = {
   High: "bg-orange-500/15 text-orange-400 border-orange-500/30",
 }
 
-interface Message {
-  id: string
-  recipient: string
-  emotion: string
-  risk: string
-  encryption: string
-  timestamp: string
-}
-
 export function DecryptView({ messageId }: { messageId: string }) {
   const router = useRouter()
-  const [message, setMessage] = useState<Message | null>(null)
+  const [message, setMessage] = useState<MessageMeta | null>(null)
   const [decryptedText, setDecryptedText] = useState<string | null>(null)
   const [decrypting, setDecrypting] = useState(false)
   const [decrypted, setDecrypted] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    loadMessage()
-  }, [messageId])
-
-  const loadMessage = async () => {
-    try {
-      setLoading(true)
-      const messages = await messagesAPI.list()
-      const found = messages.find((m) => m.id === messageId)
-      if (found) {
+    const load = async () => {
+      try {
+        setLoading(true)
+        // Direct fetch by ID — no longer loads all messages
+        const found = await messagesAPI.getById(messageId)
         setMessage(found)
+      } catch (error: any) {
+        toast.error(error.response?.data?.detail || "Message not found")
+      } finally {
+        setLoading(false)
       }
-    } catch (error: any) {
-      toast.error(error.response?.data?.detail || "Failed to load message")
-    } finally {
-      setLoading(false)
     }
-  }
+    load()
+  }, [messageId])
 
   const handleDecrypt = async () => {
     if (!message) return
@@ -77,6 +52,8 @@ export function DecryptView({ messageId }: { messageId: string }) {
       const result = await messagesAPI.decrypt(message.id)
       setDecryptedText(result.plaintext)
       setDecrypted(true)
+      // Mark as read
+      try { await messagesAPI.markRead(message.id) } catch {}
     } catch (error: any) {
       toast.error(error.response?.data?.detail || "Failed to decrypt message")
     } finally {
@@ -98,125 +75,101 @@ export function DecryptView({ messageId }: { messageId: string }) {
         <Lock className="h-12 w-12 text-muted-foreground/30" />
         <p className="text-sm text-muted-foreground">Message not found</p>
         <Button variant="outline" onClick={() => router.push("/inbox")} className="gap-2">
-          <ArrowLeft className="h-4 w-4" />
-          Back to Inbox
+          <ArrowLeft className="h-4 w-4" /> Back to Inbox
         </Button>
       </div>
     )
   }
 
   const EmotionIcon = emotionIcons[message.emotion] ?? Meh
+  const displayEmail = message.recipient_email || message.recipient || "Unknown"
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center gap-4">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => router.push("/inbox")}
-          className="text-muted-foreground hover:text-foreground"
-        >
+        <Button variant="ghost" size="icon" onClick={() => router.back()} className="text-muted-foreground hover:text-foreground">
           <ArrowLeft className="h-5 w-5" />
-          <span className="sr-only">Back to inbox</span>
         </Button>
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">
-            Decryption Console
-          </h1>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">Decryption Console</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">Message {message.id.slice(0, 8)}</p>
         </div>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Message metadata */}
+        {/* Metadata */}
         <Card className="border-border bg-card lg:col-span-1">
           <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-sm font-semibold text-foreground">
-              <FileText className="h-4 w-4 text-primary" />
-              Message Details
+            <CardTitle className="flex items-center gap-2 text-sm font-semibold">
+              <FileText className="h-4 w-4 text-primary" /> Message Details
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-4 px-5 pb-5">
             <div className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Message ID
-              </span>
-              <span className="font-mono text-sm text-foreground">{message.id}</span>
+              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Message ID</span>
+              <span className="font-mono text-xs text-foreground break-all">{message.id}</span>
             </div>
-
             <div className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Recipient
-              </span>
+              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">From</span>
               <div className="flex items-center gap-2">
                 <User className="h-3.5 w-3.5 text-muted-foreground" />
-                <span className="font-mono text-sm text-foreground">{message.recipient}</span>
+                <span className="font-mono text-sm text-foreground">{message.sender_email || "Unknown"}</span>
               </div>
             </div>
-
             <div className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Emotion
-              </span>
+              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">To</span>
+              <div className="flex items-center gap-2">
+                <User className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="font-mono text-sm text-foreground">{displayEmail}</span>
+              </div>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Emotion</span>
               <div className="flex items-center gap-2">
                 <EmotionIcon className="h-4 w-4 text-primary" />
                 <span className="text-sm capitalize text-foreground">{message.emotion}</span>
               </div>
             </div>
-
             <div className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Risk Level
-              </span>
-              <Badge
-                variant="outline"
-                className={cn("w-fit font-mono text-xs uppercase", riskColors[message.risk])}
-              >
+              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Risk Level</span>
+              <Badge variant="outline" className={cn("w-fit font-mono text-xs uppercase", riskColors[message.risk])}>
                 {message.risk}
               </Badge>
             </div>
-
             <div className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Encryption
-              </span>
+              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Encryption</span>
               <div className="flex items-center gap-2">
                 <Lock className="h-3.5 w-3.5 text-primary" />
-                <span className="font-mono text-sm font-semibold text-primary">
-                  {message.encryption}
-                </span>
+                <span className="font-mono text-sm font-semibold text-primary">{message.encryption}</span>
               </div>
             </div>
-
             <div className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Timestamp
-              </span>
+              <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Timestamp</span>
               <div className="flex items-center gap-2">
                 <Clock className="h-3.5 w-3.5 text-muted-foreground" />
                 <span className="text-xs text-muted-foreground">
-                  {formatDistanceToNow(new Date(message.timestamp), {
-                    addSuffix: true,
-                  })}
+                  {formatDistanceToNow(new Date(message.timestamp), { addSuffix: true })}
                 </span>
               </div>
             </div>
           </CardContent>
         </Card>
 
-        {/* Decryption panel */}
+        {/* Decrypt panel */}
         <div className="flex flex-col gap-4 lg:col-span-2">
           <Card className="border-border bg-card">
             <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-sm font-semibold text-foreground">
-                <Lock className="h-4 w-4 text-muted-foreground" />
-                Encrypted Message
+              <CardTitle className="flex items-center gap-2 text-sm font-semibold">
+                <Lock className="h-4 w-4 text-muted-foreground" /> Encrypted Payload
               </CardTitle>
             </CardHeader>
             <CardContent className="px-5 pb-5">
               <div className="rounded-lg border border-border bg-secondary/30 p-4">
-                <p className="text-sm text-muted-foreground">
-                  Message is encrypted with {message.encryption}
+                <p className="font-mono text-xs text-muted-foreground">
+                  [AES-CBC Ciphertext] • Algorithm: {message.encryption} • HKDF-SHA256 key derivation
+                </p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Click "Decrypt Message" to re-derive the key and reveal plaintext.
                 </p>
               </div>
             </CardContent>
@@ -226,19 +179,13 @@ export function DecryptView({ messageId }: { messageId: string }) {
             <Button
               onClick={handleDecrypt}
               disabled={decrypting}
-              className="w-full gap-2 bg-primary text-primary-foreground hover:bg-primary/90"
+              className="w-full gap-2"
               size="lg"
             >
               {decrypting ? (
-                <>
-                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                  Decrypting with {message.encryption}...
-                </>
+                <><div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" /> Decrypting with {message.encryption}...</>
               ) : (
-                <>
-                  <Unlock className="h-4 w-4" />
-                  Decrypt Message
-                </>
+                <><Unlock className="h-4 w-4" /> Decrypt Message</>
               )}
             </Button>
           )}
@@ -247,21 +194,19 @@ export function DecryptView({ messageId }: { messageId: string }) {
             <Card className="border-primary/30 bg-primary/5">
               <CardHeader className="pb-3">
                 <CardTitle className="flex items-center gap-2 text-sm font-semibold text-primary">
-                  <ShieldCheck className="h-4 w-4" />
-                  Decrypted Plaintext
+                  <ShieldCheck className="h-4 w-4" /> Decrypted Plaintext
                 </CardTitle>
               </CardHeader>
               <CardContent className="px-5 pb-5">
                 <div className="rounded-lg border border-primary/20 bg-card p-4">
-                  <p className="text-sm leading-relaxed text-foreground">{decryptedText}</p>
+                  <p className="text-sm leading-relaxed text-foreground whitespace-pre-wrap">{decryptedText}</p>
                 </div>
               </CardContent>
             </Card>
           )}
 
           <Button variant="outline" onClick={() => router.push("/inbox")} className="gap-2">
-            <ArrowLeft className="h-4 w-4" />
-            Back to Inbox
+            <ArrowLeft className="h-4 w-4" /> Back to Inbox
           </Button>
         </div>
       </div>

@@ -60,8 +60,8 @@ app = FastAPI(
     description="Sentiment-based AES strength with JWT + Google OAuth",
 )
 
-app.add_middleware(SessionMiddleware, secret_key=os.getenv("JWT_SECRET", "change-me"))
-
+# ─── Middleware (order matters — FastAPI applies in reverse) ──────────────────
+# CORS must be added first so it wraps everything
 _allowed_origins = [o.strip() for o in os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
 ).split(",") if o.strip()]
@@ -72,6 +72,15 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# SessionMiddleware must be added AFTER CORS so it is innermost
+# This fixes: AssertionError: SessionMiddleware must be installed to access request.session
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SESSION_SECRET", os.getenv("JWT_SECRET", "change-me")),
+    https_only=False,   # False for localhost dev
+    same_site="lax",
 )
 
 UPLOAD_DIR = os.getenv("ATTACHMENT_STORAGE_PATH", "./uploads")
@@ -111,7 +120,12 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
 @app.get("/auth/google")
 async def auth_google(request: Request):
     redirect_uri = request.url_for("auth_google_callback")
-    return await oauth.google.authorize_redirect(request, redirect_uri)
+    return await oauth.google.authorize_redirect(
+        request,
+        redirect_uri,
+        access_type="offline",
+        prompt="consent",
+    )
 
 
 @app.get("/auth/google/callback")
@@ -135,7 +149,8 @@ async def auth_google_callback(request: Request, db: Session = Depends(get_db)):
     db.commit()
 
     jwt_token = create_access_token({"sub": user.email})
-    return RedirectResponse(f"{os.getenv('FRONTEND_URL')}/oauth-success?token={jwt_token}")
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    return RedirectResponse(f"{frontend_url}/oauth-success?token={jwt_token}")
 
 
 # ─── Profile ──────────────────────────────────────────────────────────────────
@@ -175,12 +190,8 @@ def _process_and_dispatch_message(
     ciphertext_b64, iv_b64, salt_b64 = encrypt_plaintext(message_text, key_length)
 
     logger.info(
-        "Message encrypted",
-        extra={
-            "message_id": message_id,
-            "emotion": sentiment.emotion,
-            "encryption": encryption_label,
-        },
+        "Message encrypted | id=%s emotion=%s encryption=%s",
+        message_id, sentiment.emotion, encryption_label,
     )
 
     msg = Message(
@@ -200,6 +211,7 @@ def _process_and_dispatch_message(
 
     return message_id, sentiment.emotion, risk, encryption_label, ciphertext_b64
 
+
 def _notify_recipient_via_gmail(
     current_user: User,
     recipient_email: str,
@@ -211,11 +223,12 @@ def _notify_recipient_via_gmail(
 ):
     if not current_user.google_access_token:
         return
-        
+
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
     gmail_body = (
         f"You have a new encrypted message.\n\n"
         f"Encryption: {encryption_label}  |  Emotion: {emotion}\n\n"
-        f"Open the app to read it: {os.getenv('FRONTEND_URL', 'http://localhost:3000')}/message/{message_id}\n\n"
+        f"Open the app to read it: {frontend_url}/decrypt/{message_id}\n\n"
         f"--- Ciphertext (for reference) ---\n{ciphertext_b64}"
     )
     try:
@@ -227,7 +240,7 @@ def _notify_recipient_via_gmail(
                 if new_token:
                     send_email(new_token, recipient_email, "New Encrypted Message", gmail_body)
             except Exception:
-                pass
+                pass  # Gmail delivery is best-effort; message is already saved in DB
 
 
 @app.post("/send", response_model=SendResponse)
@@ -263,7 +276,6 @@ async def send_with_attachments(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Multipart endpoint supporting file attachments."""
     message_id, emotion, risk, encryption_label, ciphertext_b64 = _process_and_dispatch_message(
         message, recipient, db, current_user
     )
@@ -272,7 +284,7 @@ async def send_with_attachments(
         if not upload.filename:
             continue
         content = await upload.read()
-        if len(content) > 10 * 1024 * 1024:  # 10 MB limit per file
+        if len(content) > 10 * 1024 * 1024:
             db.rollback()
             raise HTTPException(413, f"File {upload.filename} exceeds 10 MB limit")
 
@@ -290,7 +302,7 @@ async def send_with_attachments(
         ))
 
     db.commit()
-    logger.info("Message with %d attachment(s) saved", len(files), extra={"message_id": message_id})
+    logger.info("Message with %d attachment(s) saved | id=%s", len(files), message_id)
 
     _notify_recipient_via_gmail(
         current_user, recipient, encryption_label, emotion, message_id, ciphertext_b64, db
@@ -419,6 +431,40 @@ def get_messages(
     return result
 
 
+# ─── Get Single Message ───────────────────────────────────────────────────────
+
+@app.get("/messages/{message_id}", response_model=MessageMeta)
+def get_message_by_id(
+    message_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fetch a single message by ID — used by the decrypt view instead of
+    loading the entire message list and filtering client-side."""
+    msg = db.query(Message).filter(Message.id == message_id).first()
+    if not msg:
+        raise HTTPException(404, "Message not found")
+    if msg.sender_id != current_user.id and msg.recipient_id != current_user.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized")
+
+    sender = db.query(User).filter(User.id == msg.sender_id).first()
+    recipient = db.query(User).filter(User.id == msg.recipient_id).first()
+    return MessageMeta(
+        id=msg.id,
+        sender_id=msg.sender_id,
+        recipient_id=msg.recipient_id,
+        sender_email=sender.email if sender else "Unknown",
+        recipient_email=recipient.email if recipient else "Unknown",
+        recipient=recipient.email if recipient else "Unknown",
+        emotion=msg.emotion,
+        risk=msg.risk,
+        encryption=msg.encryption,
+        timestamp=msg.timestamp,
+        is_read=msg.is_read,
+        created_at=msg.created_at,
+    )
+
+
 # ─── Mark Read ───────────────────────────────────────────────────────────────
 
 @app.patch("/messages/{message_id}/read")
@@ -454,22 +500,14 @@ def decrypt_message(
 
     key_length = ENCRYPTION_KEY_LEN.get(msg.encryption, 24)
 
-    # salt column may be empty for old rows encrypted with the previous scheme
     if not msg.salt:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "This message was encrypted with an older key scheme and cannot be "
-            "decrypted with the current version. Please re-send the message.",
+            "This message was encrypted with an older key scheme. Please re-send the message.",
         )
 
-    plaintext = decrypt_ciphertext(
-        msg.ciphertext,
-        msg.iv,
-        msg.salt,
-        key_length,
-    )
+    plaintext = decrypt_ciphertext(msg.ciphertext, msg.iv, msg.salt, key_length)
 
-    # Mark as read when the recipient decrypts
     if msg.recipient_id == current_user.id and not msg.is_read:
         msg.is_read = True
         db.commit()
@@ -493,7 +531,7 @@ def list_attachments(
     return msg.attachments
 
 
-# ─── Real-time Sentiment Analysis (public) ────────────────────────────────────
+# ─── Real-time Sentiment Analysis ────────────────────────────────────────────
 
 from pydantic import BaseModel
 
@@ -510,7 +548,7 @@ class AnalyzeResponse(BaseModel):
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze_message(req: AnalyzeRequest):
-    """Predict emotion/risk/encryption for a draft — used by the compose form."""
+    """Live sentiment prediction for compose form — no auth required."""
     sentiment = analyze_sentiment(req.message)
     risk = get_risk(sentiment.emotion)
     encryption_label, _ = get_encryption_policy(risk)
@@ -527,7 +565,6 @@ def emotion_analytics(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Return emotion distribution for the current user's sent messages."""
     rows = (
         db.query(Message.emotion, func.count(Message.id).label("count"))
         .filter(Message.sender_id == current_user.id)

@@ -6,12 +6,19 @@ from sqlalchemy.pool import StaticPool
 
 from models import Base
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # SQLite file in backend directory
-SQLALCHEMY_DATABASE_URL = "sqlite:///./emotion_encryption.db"
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./emotion_encryption.db")
+
+connect_args = {"check_same_thread": False} if SQLALCHEMY_DATABASE_URL.startswith("sqlite") else {}
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args=connect_args,
     poolclass=StaticPool,
 )
 

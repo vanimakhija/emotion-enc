@@ -32,3 +32,5 @@ starlette>=0.36.0
 
 # Rate limiting
 slowapi>=0.1.9
+# Testing (dev only)
+pytest>=8.0.0
