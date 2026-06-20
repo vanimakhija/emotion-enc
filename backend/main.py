@@ -120,6 +120,9 @@ def login(data: UserLogin, db: Session = Depends(get_db)):
 @app.get("/auth/google")
 async def auth_google(request: Request):
     redirect_uri = request.url_for("auth_google_callback")
+    # access_type=offline + prompt=consent force Google to issue a refresh
+    # token, even if the user has authorized this app before. Without this,
+    # Google only issues a refresh token on the very first-ever consent grant.
     return await oauth.google.authorize_redirect(
         request,
         redirect_uri,
@@ -221,7 +224,13 @@ def _notify_recipient_via_gmail(
     ciphertext_b64: str,
     db: Session,
 ):
+    """Send a Gmail notification to the recipient. Never sends plaintext —
+    only a link back into the app plus the ciphertext for reference.
+    All outcomes (success, failure, skip) are logged explicitly so delivery
+    issues are visible in the backend terminal instead of failing silently.
+    """
     if not current_user.google_access_token:
+        logger.info("Gmail notification skipped — sender has no Google access token")
         return
 
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -232,15 +241,22 @@ def _notify_recipient_via_gmail(
         f"--- Ciphertext (for reference) ---\n{ciphertext_b64}"
     )
     try:
-        send_email(current_user.google_access_token, recipient_email, "New Encrypted Message", gmail_body)
-    except GmailException:
+        result = send_email(current_user.google_access_token, recipient_email, "New Encrypted Message", gmail_body)
+        logger.info("Gmail notification sent successfully | to=%s result=%s", recipient_email, result)
+    except GmailException as e:
+        logger.warning("Gmail send failed with access token, trying refresh | error=%s", str(e))
         if current_user.google_refresh_token:
             try:
                 new_token = refresh_access_token(current_user, db)
                 if new_token:
-                    send_email(new_token, recipient_email, "New Encrypted Message", gmail_body)
-            except Exception:
-                pass  # Gmail delivery is best-effort; message is already saved in DB
+                    result = send_email(new_token, recipient_email, "New Encrypted Message", gmail_body)
+                    logger.info("Gmail notification sent successfully after refresh | to=%s result=%s", recipient_email, result)
+                else:
+                    logger.error("Token refresh returned no new token")
+            except Exception as refresh_error:
+                logger.error("Gmail send failed even after token refresh | error=%s", str(refresh_error))
+        else:
+            logger.error("Gmail send failed and no refresh token available | error=%s", str(e))
 
 
 @app.post("/send", response_model=SendResponse)
