@@ -49,11 +49,15 @@ def load_sentiment140(path="data/sentiment140.csv", sample_size=50000):
     # Original labels: 0=negative, 4=positive. Map to 0/1.
     df["label"] = df["target"].map({0: 0, 4: 1})
     df = df.dropna(subset=["label"])
-    # Balanced random sample for faster training
-    df = df.groupby("label").apply(
-        lambda x: x.sample(min(len(x), sample_size // 2), random_state=RANDOM_STATE)
-    ).reset_index(drop=True)
-    return df["text"].tolist(), df["label"].tolist()
+
+    # Balanced random sample — avoids groupby().apply() column-flattening
+    # issues across different pandas versions.
+    half = sample_size // 2
+    df_neg = df[df["label"] == 0].sample(n=min(half, (df["label"] == 0).sum()), random_state=RANDOM_STATE)
+    df_pos = df[df["label"] == 1].sample(n=min(half, (df["label"] == 1).sum()), random_state=RANDOM_STATE)
+    df_balanced = pd.concat([df_neg, df_pos]).sample(frac=1, random_state=RANDOM_STATE).reset_index(drop=True)
+
+    return df_balanced["text"].tolist(), df_balanced["label"].tolist()
 
 
 def load_movie_reviews_fallback():
