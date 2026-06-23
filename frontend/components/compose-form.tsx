@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useRef } from "react"
+import { useState, useCallback, useRef, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -13,6 +13,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import { ModelCompareCard } from "@/components/model-compare-card"
 
 const emotionIcons: Record<string, React.ElementType> = {
   Positive: Smile,
@@ -218,6 +219,9 @@ export function ComposeForm() {
               </Button>
             </CardContent>
           </Card>
+
+          {/* Model comparison — VADER vs trained classifier, shown live as you type */}
+          <ModelCompareCard message={message} />
         </div>
 
         {/* RIGHT — real-time analysis */}
